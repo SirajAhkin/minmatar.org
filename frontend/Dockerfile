@@ -1,25 +1,41 @@
-FROM node:lts AS base
-WORKDIR /app
+# use the official Bun image
+# see all versions at https://hub.docker.com/r/oven/bun/tags
+FROM oven/bun:1 as base
+WORKDIR /usr/src/app
 
-# By copying only the package.json and package-lock.json here, we ensure that the following `-deps` steps are independent of the source code.
-# Therefore, the `-deps` steps will be skipped if only the source code changes.
-COPY package.json package-lock.json ./
+# install dependencies into temp directory
+# this will cache them and speed up future builds
+FROM base AS install
+RUN mkdir -p /temp/dev
+COPY package.json bun.lockb /temp/dev/
+WORKDIR /temp/dev
+RUN bun install --frozen-lockfile
 
-FROM base AS prod-deps
-RUN npm install --production
+# install with --production (exclude devDependencies)
+RUN mkdir -p /temp/prod
+COPY package.json bun.lockb /temp/prod/
+WORKDIR /temp/prod
+RUN bun install --frozen-lockfile --production
 
-FROM base AS build-deps
-RUN npm install --production=false
-
-FROM build-deps AS build
+# copy node_modules from temp directory
+# then copy all (non-ignored) project files into the image
+FROM base AS prerelease
+COPY --from=install /temp/dev/node_modules node_modules
 COPY . .
-RUN npm run build
 
-FROM base AS runtime
-COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
+# [optional] tests & build
+ENV NODE_ENV=production
+RUN bun test
+RUN bun run build
 
+# copy production dependencies and source code into final image
+FROM base AS release
+COPY --from=install /temp/prod/node_modules node_modules
+COPY --from=prerelease /usr/src/app/dist ./dist
+
+# run the app
+USER bun
 ENV HOST=0.0.0.0
 ENV PORT=4321
-EXPOSE 4321
-CMD node ./dist/server/entry.mjs
+EXPOSE 4321/tcp
+ENTRYPOINT [ "bun", "run", "./dist/server/entry.mjs" ]
